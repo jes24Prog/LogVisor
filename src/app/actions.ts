@@ -19,6 +19,10 @@ const sampleLogs = [
 ];
 
 const parseLine = (line: string, index: number): LogEntry | null => {
+  if (!line.trim()) {
+    return null;
+  }
+  
   try {
     const json = JSON.parse(line);
     return {
@@ -74,6 +78,7 @@ const parseLine = (line: string, index: number): LogEntry | null => {
     }
   }
 
+  // Fallback for any other line
   return {
     id: `log-${index}-${Date.now()}`,
     timestamp: new Date().toISOString(),
