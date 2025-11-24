@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useRef, useState } from "react";
@@ -33,20 +34,10 @@ const CodeBlock = ({ title, content, language }: { title: string; content: strin
     const formatJson = (jsonString: string) => {
       try {
         const parsed = JSON.parse(jsonString);
-        const formatted = JSON.stringify(parsed, null, 2);
-         return formatted
-          .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?)/g, (match) => {
-            let cls = 'text-green-400';
-            if (/:$/.test(match)) {
-              cls = 'text-purple-400 dark:text-purple-300';
-            }
-            return `<span class="${cls}">${match}</span>`;
-          })
-          .replace(/\b(true|false)\b/g, '<span class="text-blue-500 dark:text-blue-300">$1</span>')
-          .replace(/\b(null)\b/g, '<span class="text-gray-500">$1</span>')
-          .replace(/\b-?\d+(\.\d+)?([eE][+-]?\d+)?\b/g, '<span class="text-orange-400">$&</span>');
+        return JSON.stringify(parsed, null, 2);
       } catch (e) {
-        return jsonString; // Not valid JSON, return as is
+        // If JSON is invalid, return the original string
+        return jsonString;
       }
     };
     
@@ -65,14 +56,13 @@ const CodeBlock = ({ title, content, language }: { title: string; content: strin
                 </Button>
             </div>
             <pre className="text-xs p-4 bg-gray-900 dark:bg-black text-white rounded-md whitespace-pre-wrap font-code break-words">
-                <code dangerouslySetInnerHTML={{ __html: formattedContent }} />
+                <code>{formattedContent}</code>
             </pre>
         </div>
     );
 }
 
 export function LogEntryItem({ log, isExpanded, onToggle, isSnipping, onSnip }: LogEntryItemProps) {
-  const { toast } = useToast();
   const itemRef = useRef<HTMLDivElement>(null);
 
   const LevelIcon = getLogLevelIcon(log.level);
@@ -154,7 +144,7 @@ export function LogEntryItem({ log, isExpanded, onToggle, isSnipping, onSnip }: 
           )}
 
           {Object.keys(log.details).length > 0 && (
-            <CodeBlock title="Details" content={JSON.stringify(log.details)} language="json" />
+            <CodeBlock title="Details" content={JSON.stringify(log.details, null, 2)} language="json" />
           )}
 
           <CodeBlock title="Raw Log" content={log.raw} language="text" />
