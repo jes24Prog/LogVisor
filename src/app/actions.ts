@@ -10,17 +10,72 @@ const sampleLogs = [
   `2024-07-31T10:01:30.456Z my-app[1234]: INFO: User 'admin' logged in successfully`,
   // key=value
   `timestamp=2024-07-31T10:02:15.789Z level=warn service=db-connector message="Connection pool nearing capacity" usage=95%`,
-  // multiline stack trace
-  `2024-07-31T10:03:00.000Z my-app[1234]: ERROR: Unhandled exception\njava.lang.NullPointerException\n\tat com.example.MyService.process(MyService.java:42)\n\tat com.example.Main.main(Main.java:10)`,
-  // debug log
-  `2024-07-31T10:04:00.000Z my-app[1234]: DEBUG: Received payload: { "user_id": 42, "action": "update" }`,
+  // multiline stack trace with JSON
+  `2024-07-31T10:03:00.000Z my-app[1234]: ERROR: Unhandled exception processing user data\nPayload: {"userId": 123, "action": "updateProfile", "data": {"name": "John Doe", "email": "john.doe@example.com"}}\njava.lang.NullPointerException\n\tat com.example.MyService.process(MyService.java:42)\n\tat com.example.Main.main(Main.java:10)`,
+  // XML in log
+  `2024-07-31T10:04:00.000Z my-app[1234]: DEBUG: Received SOAP request:\n<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"><soap:Header/><soap:Body><m:GetResponse xmlns:m="http://www.example.org/stock"><m:Item>Apple</m:Item></m:GetResponse></soap:Body></soap:Envelope>`,
   // trace log
   `2024-07-31T10:05:00.000Z my-app[1234]: TRACE: Entering function calculate_score`
 ];
 
+
+const extractStructuredData = (text: string) => {
+    const parts: { type: 'json' | 'xml' | 'text'; content: string }[] = [];
+    let remainingText = text;
+    
+    // Regex to find JSON objects/arrays or XML blocks
+    const regex = /(<[a-zA-Z/][^>]*>[\s\S]*?<\/[a-zA-Z][^>]*>|{[^}]*}|\[[^\]]*\])/g;
+
+    let lastIndex = 0;
+    let match;
+
+    while ((match = regex.exec(remainingText)) !== null) {
+        const potentialJson = match[1];
+        const potentialXml = match[1];
+
+        // Add text before the match
+        if (match.index > lastIndex) {
+            parts.push({ type: 'text', content: remainingText.substring(lastIndex, match.index) });
+        }
+
+        // Check if it's valid JSON
+        try {
+            JSON.parse(potentialJson);
+            parts.push({ type: 'json', content: potentialJson });
+            lastIndex = match.index + potentialJson.length;
+            continue;
+        } catch (e) {
+            // Not valid JSON
+        }
+        
+        // Check if it's likely XML
+        if (potentialXml.startsWith('<') && potentialXml.endsWith('>')) {
+             parts.push({ type: 'xml', content: potentialXml });
+             lastIndex = match.index + potentialXml.length;
+             continue;
+        }
+        
+        // If it's neither, treat it as text up to the end of the match
+        parts.push({ type: 'text', content: remainingText.substring(lastIndex, match.index + potentialJson.length) });
+        lastIndex = match.index + potentialJson.length;
+    }
+
+    // Add any remaining text after the last match
+    if (lastIndex < remainingText.length) {
+        parts.push({ type: 'text', content: remainingText.substring(lastIndex) });
+    }
+    
+    // If no structured data found, return the original text as a single part
+    if (parts.length === 0) {
+        return [{ type: 'text', content: text }];
+    }
+
+    return parts;
+};
+
+
 const parseLine = (line: string, index: number): LogEntry => {
   if (!line.trim()) {
-    // This should ideally not happen if called from parseLogs which filters empty lines, but as a safeguard:
     return {
       id: `log-empty-${index}-${Date.now()}`,
       timestamp: new Date().toISOString(),
@@ -43,95 +98,113 @@ const parseLine = (line: string, index: number): LogEntry => {
       raw: line,
     };
   } catch (e) {
-    // Not JSON, try other formats
+    // Not a full JSON line, continue parsing
   }
 
-  const syslogMatch = line.match(/^(\S+) \S+\[\d+\]: (INFO|WARN|ERROR|DEBUG|TRACE): (.*)/);
-  if (syslogMatch) {
-    const [, timestamp, level, message] = syslogMatch;
-    return {
-      id: `log-${index}-${Date.now()}`,
-      timestamp: new Date(timestamp).toISOString(),
-      level: level as LogLevel,
-      message,
-      details: {},
-      raw: line,
-    };
-  }
-  
-  const kvMatch = line.match(/level=(\w+).*message="([^"]+)"/);
-  if (kvMatch) {
-      const timestampMatch = line.match(/timestamp=(\S+)/);
-      const [, level, message] = kvMatch;
-      const upperLevel = level.toUpperCase();
-      return {
-          id: `log-${index}-${Date.now()}`,
-          timestamp: timestampMatch ? new Date(timestampMatch[1]).toISOString() : new Date().toISOString(),
-          level: ['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE'].includes(upperLevel) ? upperLevel as LogLevel : 'OTHER',
-          message,
-          details: Object.fromEntries(line.split(' ').map(part => part.split('='))),
-          raw: line,
-      };
-  }
-  
-  // Free text with level hint
-  const freeTextMatch = line.match(/^(\S+) .*?(ERROR|WARN|INFO|DEBUG|TRACE)/i);
-  if (freeTextMatch) {
-    const [, timestamp, level] = freeTextMatch;
-    return {
-      id: `log-${index}-${Date.now()}`,
-      timestamp: new Date(timestamp).toISOString(),
-      level: level.toUpperCase() as LogLevel,
-      message: line,
-      details: {},
-      raw: line
+  // Regex for syslog-like, key-value, or generic timestamped lines
+  const logStartRegex = /^(?:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[.,]\d{3,9}Z?)|(\d{2}:\d{2}:\d{2}[.,]\d{3}))?.*?(INFO|WARN|ERROR|DEBUG|TRACE)/i;
+  let match = line.match(logStartRegex);
+
+  let timestamp = new Date();
+  let level: LogLevel = 'OTHER';
+  let message = line;
+  let details = {};
+
+  if (match) {
+    const timestampStr = match[1] || match[2];
+    level = match[3].toUpperCase() as LogLevel;
+    
+    if (timestampStr) {
+      if (match[2]) { // Time only
+        const today = new Date();
+        const datePart = today.toISOString().split('T')[0];
+        try {
+          timestamp = new Date(`${datePart}T${timestampStr.replace(',', '.')}Z`);
+        } catch(e) { /* ignore invalid date */ }
+
+      } else { // Full timestamp
+         try {
+          timestamp = new Date(timestampStr.replace(',', '.'));
+        } catch(e) { /* ignore invalid date */ }
+      }
     }
+    
+    // Try to parse key-value pairs
+    if (line.includes('=')) {
+        const kvPairs = line.match(/(\w+)=("([^"]*)"|'([^']*)'|(\S+))/g);
+        if (kvPairs) {
+            details = kvPairs.reduce((acc, pair) => {
+                const [key, ...valParts] = pair.split('=');
+                let value = valParts.join('=').trim();
+                if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+                    value = value.slice(1, -1);
+                }
+                if (key) acc[key] = value;
+                return acc;
+            }, {} as Record<string, any>);
+            
+            if (details.message) {
+              message = details.message;
+            }
+        }
+    }
+
   }
 
   // Fallback for any other line
+  const baseEntry: Omit<LogEntry, 'id'> = {
+    timestamp: timestamp.toISOString(),
+    level,
+    message,
+    details,
+    raw: line,
+  };
+
+  const extractedData = extractStructuredData(baseEntry.message);
+  
+  if (extractedData.length > 1 || extractedData[0].type !== 'text') {
+      baseEntry.extractedData = extractedData;
+      // The message becomes the first line of the raw log
+      baseEntry.message = line.split('\n')[0];
+  }
+
+
   return {
     id: `log-${index}-${Date.now()}`,
-    timestamp: new Date().toISOString(),
-    level: 'OTHER',
-    message: line,
-    details: {},
-    raw: line,
+    ...baseEntry,
   };
 };
 
 export async function parseLogs(rawLogs: string): Promise<LogEntry[]> {
   // Simulate network delay and AI processing time
-  await new Promise((resolve) => setTimeout(resolve, 1000));
+  await new Promise((resolve) => setTimeout(resolve, 500));
 
   if (!rawLogs.trim()) {
     return [];
   }
   
-  // Basic multiline handling for stack traces
   const lines = rawLogs.split('\n');
   const entries: string[] = [];
   let currentEntry = '';
 
-  for (const line of lines) {
-    // A simple heuristic: if a line doesn't start with a date/timestamp, it's a continuation.
-    const isContinuation = !/^\d{4}-\d{2}-\d{2}T|\s+(at|Caused by:)/.test(line.trim()) && /^\s+/.test(line);
+  const newLogEntryRegex = /^(?:\d{4}-\d{2}-\d{2}T|\d{2}:\d{2}:\d{2}[.,]\d{3})|^\s*(?:ERROR|WARN|INFO|DEBUG|TRACE|FATAL|SEVERE)\b|timestamp=/;
 
-    if (currentEntry && isContinuation) {
-      currentEntry += '\n' + line;
-    } else {
-      if (currentEntry) {
+  for (const line of lines) {
+    if (newLogEntryRegex.test(line) && currentEntry) {
         entries.push(currentEntry);
-      }
-      currentEntry = line;
+        currentEntry = line;
+    } else {
+        currentEntry = currentEntry ? `${currentEntry}\n${line}` : line;
     }
   }
+
   if (currentEntry) {
     entries.push(currentEntry);
   }
 
   const parsed = entries
     .map((line, index) => parseLine(line, index))
-    .filter((log): log is LogEntry => !!log); // Filter out any potential nulls, just in case.
+    .filter((log): log is LogEntry => !!log);
 
   return parsed;
 }
