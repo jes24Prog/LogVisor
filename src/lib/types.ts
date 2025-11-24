@@ -7,4 +7,8 @@ export interface LogEntry {
   message: string;
   raw: string;
   details: Record<string, any>;
+  extractedData?: {
+    type: 'json' | 'xml' | 'text';
+    content: string;
+  }[];
 }
