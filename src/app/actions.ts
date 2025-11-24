@@ -18,17 +18,26 @@ const sampleLogs = [
   `2024-07-31T10:05:00.000Z my-app[1234]: TRACE: Entering function calculate_score`
 ];
 
-const parseLine = (line: string, index: number): LogEntry | null => {
+const parseLine = (line: string, index: number): LogEntry => {
   if (!line.trim()) {
-    return null;
+    // This should ideally not happen if called from parseLogs which filters empty lines, but as a safeguard:
+    return {
+      id: `log-empty-${index}-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      level: 'OTHER',
+      message: '--- empty line ---',
+      details: {},
+      raw: line,
+    };
   }
   
   try {
     const json = JSON.parse(line);
+    const level = (json.level?.toUpperCase() || 'OTHER');
     return {
       id: `log-${index}-${Date.now()}`,
       timestamp: json.timestamp || new Date().toISOString(),
-      level: (json.level?.toUpperCase() as LogLevel) || 'OTHER',
+      level: ['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE'].includes(level) ? level as LogLevel : 'OTHER',
       message: json.message || 'No message',
       details: json,
       raw: line,
@@ -54,10 +63,11 @@ const parseLine = (line: string, index: number): LogEntry | null => {
   if (kvMatch) {
       const timestampMatch = line.match(/timestamp=(\S+)/);
       const [, level, message] = kvMatch;
+      const upperLevel = level.toUpperCase();
       return {
           id: `log-${index}-${Date.now()}`,
           timestamp: timestampMatch ? new Date(timestampMatch[1]).toISOString() : new Date().toISOString(),
-          level: level.toUpperCase() as LogLevel,
+          level: ['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE'].includes(upperLevel) ? upperLevel as LogLevel : 'OTHER',
           message,
           details: Object.fromEntries(line.split(' ').map(part => part.split('='))),
           raw: line,
@@ -121,7 +131,7 @@ export async function parseLogs(rawLogs: string): Promise<LogEntry[]> {
 
   const parsed = entries
     .map((line, index) => parseLine(line, index))
-    .filter((log): log is LogEntry => log !== null);
+    .filter((log): log is LogEntry => !!log); // Filter out any potential nulls, just in case.
 
   return parsed;
 }
